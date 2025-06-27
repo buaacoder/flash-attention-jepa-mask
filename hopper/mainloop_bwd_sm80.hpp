@@ -22,7 +22,7 @@ namespace flash {
 using namespace cute;
 
 template <int Stages, int Stages_dO, class TileShape_MNK_, class Element_, class ElementAccum_, class ArchTag_,
-        bool Is_causal_, bool Is_local_, bool Has_softcap_, bool Varlen_, bool Deterministic,
+        bool Is_causal_, bool Is_local_, bool Variable_seqlenk_mask_, bool Has_softcap_, bool Varlen_, bool Deterministic,
         bool SdP_swapAB_, bool dKV_swapAB_, bool dQ_swapAB_,
         int NumMmaWarpGroups=2, int AtomLayoutMSdP=1, int AtomLayoutNdKV=8, int AtomLayoutMdQ=1,
         bool V_in_regs=false>
@@ -37,6 +37,7 @@ struct CollectiveMainloopBwdSm80 {
     using ArchTag = ArchTag_;
     static constexpr bool Is_causal = Is_causal_;
     static constexpr bool Is_local = Is_local_;
+    static constexpr bool Variable_seqlenk_mask = Variable_seqlenk_mask_;
     static constexpr bool Has_softcap = Has_softcap_;
     static constexpr bool Varlen = Varlen_;
     static constexpr int NumMmaWarps = NumMmaWarpGroups * cutlass::NumWarpsPerWarpGroup;
@@ -306,6 +307,7 @@ struct CollectiveMainloopBwdSm80 {
         int const* const cu_seqlens_k = nullptr;
         int const* const seqused_q = nullptr;
         int const* const seqused_k = nullptr;
+        int const* const per_row_seqlens_k = nullptr;
     };
 
     // Device side kernel params
@@ -341,6 +343,7 @@ struct CollectiveMainloopBwdSm80 {
         int const *const cu_seqlens_k = nullptr;
         int const *const seqused_q = nullptr;
         int const *const seqused_k = nullptr;
+        int const* const per_row_seqlens_k = nullptr;
     };
 
     static Params
@@ -370,7 +373,7 @@ struct CollectiveMainloopBwdSm80 {
                 args.window_size_left, args.window_size_right, attention_chunk_divmod,
                 !Has_softcap ? 0.f : args.softmax_scale / args.softcap_val,
                 args.num_batch, args.dq_semaphore,
-                args.cu_seqlens_q, args.cu_seqlens_k, args.seqused_q, args.seqused_k};
+                args.cu_seqlens_q, args.cu_seqlens_k, args.seqused_q, args.seqused_k, args.per_row_seqlens_k};
     }
 
     template <typename SharedStorage, typename FrgTensordKV>
@@ -544,7 +547,7 @@ struct CollectiveMainloopBwdSm80 {
 
         flash::Mask<kBlockM, kBlockN, false /*PackGQA*/, TiledMmaSdP, SdP_swapAB> mask(
             thread_idx, seqlen_q, seqlen_k, params.window_size_left, params.window_size_right, 0 /*sink_token_length*/,
-            params.attention_chunk_divmod, params.qhead_per_khead_divmod
+            params.attention_chunk_divmod, params.qhead_per_khead_divmod, params.per_row_seqlens_k
         );
 
         {
@@ -876,7 +879,7 @@ struct CollectiveMainloopBwdSm80 {
         // We have separate iterations with causal masking. Not necessary for hdim 128 but for hdim 64
         // this helps quite a bit to not have to do causal masking for most of the iterations.
         if constexpr ((Is_causal || Is_local) && SeparateMaskingIterations) {
-            auto mask_fn = [&](auto& tSrS, int m_block) { mask.template apply<true /*Seqlenk_mask*/, Is_causal, Is_local>(tSrS, m_block, n_block); };
+            auto mask_fn = [&](auto& tSrS, int m_block) { mask.template apply<true /*Seqlenk_mask*/, Is_causal, Is_local, Variable_seqlenk_mask>(tSrS, m_block, n_block); };
             int const m_block_masking_max = ((n_block + 1) * kBlockN - 1 + seqlen_q - seqlen_k - params.window_size_right) / kBlockM + 1;
             CUTLASS_PRAGMA_NO_UNROLL
             for (; m_block < std::min(m_block_max, m_block_masking_max); ++m_block) {
@@ -889,14 +892,14 @@ struct CollectiveMainloopBwdSm80 {
             ? m_block_max
             : std::min(m_block_max, (n_block * kBlockN + seqlen_q - seqlen_k + params.window_size_left) / kBlockM);
 
-        auto mask_fn = [&](auto& tSrS, int m_block) { mask.template apply<true /*Seqlenk_mask*/, Is_causal && !SeparateMaskingIterations, Is_local && !SeparateMaskingIterations>(tSrS, m_block, n_block); };
+        auto mask_fn = [&](auto& tSrS, int m_block) { mask.template apply<true /*Seqlenk_mask*/, Is_causal && !SeparateMaskingIterations, Is_local && !SeparateMaskingIterations, Variable_seqlenk_mask>(tSrS, m_block, n_block); };
         CUTLASS_PRAGMA_NO_UNROLL
         for (; m_block < m_block_max_before_local_mask; ++m_block) {
             bwd_step(m_block, mask_fn);
         }
 
         if constexpr (Is_local && SeparateMaskingIterations) {
-            auto mask_fn = [&](auto& tSrS, int m_block) { mask.template apply<true /*Seqlenk_mask*/, false /*Causal_mask*/, Is_local>(tSrS, m_block, n_block); };
+            auto mask_fn = [&](auto& tSrS, int m_block) { mask.template apply<true /*Seqlenk_mask*/, false /*Causal_mask*/, Is_local, Variable_seqlenk_mask>(tSrS, m_block, n_block); };
             CUTLASS_PRAGMA_NO_UNROLL
             for (; m_block < m_block_max; ++m_block) {
                 bwd_step(m_block, mask_fn);

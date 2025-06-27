@@ -58,6 +58,51 @@
     }()
 #endif
 
+#ifdef FLASHATTENTION_DISABLE_LOCAL
+  #define CAUSAL_LOCAL_VARIABLE_SWITCH(CAUSAL_COND, LOCAL_COND, VARIABLE_COND, CAUSAL_CONST_NAME, LOCAL_CONST_NAME, VARIABLE_CONST_NAME, ...) \
+    [&] {                                                                                        \
+      constexpr static bool LOCAL_CONST_NAME = false;                                            \
+      if (CAUSAL_COND) {                                                                         \
+        constexpr static bool CAUSAL_CONST_NAME = true;                                          \
+        constexpr static bool VARIABLE_CONST_NAME = false;                                       \
+        return __VA_ARGS__();                                                                    \
+      } else if (VARIABLE_COND) {                                                               \
+        constexpr static bool CAUSAL_CONST_NAME = false;                                         \
+        constexpr static bool VARIABLE_CONST_NAME = true;                                        \
+        return __VA_ARGS__();                                                                    \
+      } else {                                                                                   \
+        constexpr static bool CAUSAL_CONST_NAME = false;                                         \
+        constexpr static bool VARIABLE_CONST_NAME = false;                                       \
+        return __VA_ARGS__();                                                                    \
+      }                                                                                          \
+    }()
+#else
+  #define CAUSAL_LOCAL_VARIABLE_SWITCH(CAUSAL_COND, LOCAL_COND, VARIABLE_COND, CAUSAL_CONST_NAME, LOCAL_CONST_NAME, VARIABLE_CONST_NAME, ...) \
+    [&] {                                                                                        \
+      if (CAUSAL_COND) {                                                                         \
+        constexpr static bool CAUSAL_CONST_NAME = true;                                          \
+        constexpr static bool LOCAL_CONST_NAME = false;                                          \
+        constexpr static bool VARIABLE_CONST_NAME = false;                                       \
+        return __VA_ARGS__();                                                                    \
+      } else if (LOCAL_COND) {                                                                   \
+        constexpr static bool CAUSAL_CONST_NAME = false;                                         \
+        constexpr static bool LOCAL_CONST_NAME = true;                                           \
+        constexpr static bool VARIABLE_CONST_NAME = false;                                       \
+        return __VA_ARGS__();                                                                    \
+      } else if (VARIABLE_COND) {                                                               \
+        constexpr static bool CAUSAL_CONST_NAME = false;                                         \
+        constexpr static bool LOCAL_CONST_NAME = false;                                          \
+        constexpr static bool VARIABLE_CONST_NAME = true;                                        \
+        return __VA_ARGS__();                                                                    \
+      } else {                                                                                   \
+        constexpr static bool CAUSAL_CONST_NAME = false;                                         \
+        constexpr static bool LOCAL_CONST_NAME = false;                                          \
+        constexpr static bool VARIABLE_CONST_NAME = false;                                       \
+        return __VA_ARGS__();                                                                    \
+      }                                                                                          \
+    }()
+#endif
+
 #ifdef FLASHATTENTION_DISABLE_SOFTCAP
   #define SOFTCAP_SWITCH(COND, CONST_NAME, ...)                                                  \
   [&] {                                                                                          \

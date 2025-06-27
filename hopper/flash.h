@@ -81,6 +81,9 @@ struct Flash_fwd_params : public Qkv_params {
     int *__restrict__ seqused_q;
     int *__restrict__ seqused_k;
 
+    // Per-row seqlen_k values for Variable_seqlenk_mask
+    int *__restrict__ per_row_seqlens_k;
+
     // The stride between rows of Oaccum.
     index_t oaccum_split_stride;
     index_t oaccum_batch_stride;
@@ -145,6 +148,7 @@ struct Flash_fwd_params : public Qkv_params {
     bool is_e4m3;
     bool is_causal;
     bool is_local;
+    bool is_variable_seqlenk_mask;
 
     bool is_rotary_interleaved;
 

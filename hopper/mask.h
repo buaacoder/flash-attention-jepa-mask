@@ -24,12 +24,14 @@ struct Mask {
     int const window_size_left, window_size_right, sink_token_length;
     cutlass::FastDivmod const attention_chunk_divmod;
     cutlass::FastDivmod const qhead_per_khead_divmod;
+    int const * per_row_seqlens_k;  // New: pointer to per-row seqlen_k values
 
     CUTLASS_DEVICE
     Mask(const int thread_idx, const int seqlen_q, const int seqlen_k,
          const int window_size_left, const int window_size_right, const int sink_token_length,
          cutlass::FastDivmod const &attention_chunk_divmod,
-         cutlass::FastDivmod const &qhead_per_khead_divmod)
+         cutlass::FastDivmod const &qhead_per_khead_divmod,
+         const int *per_row_seqlens_k = nullptr)
         : thread_idx(thread_idx)
         , seqlen_q(seqlen_q)
         , seqlen_k(seqlen_k)
@@ -38,24 +40,40 @@ struct Mask {
         , sink_token_length(sink_token_length)
         , attention_chunk_divmod(attention_chunk_divmod)
         , qhead_per_khead_divmod(qhead_per_khead_divmod)
+        , per_row_seqlens_k(per_row_seqlens_k)
     {
     };
 
-    template <bool Seqlenk_mask=false, bool Causal_mask=false, bool Local_mask=false,
+    template <bool Seqlenk_mask=false, bool Causal_mask=false, bool Local_mask=false, bool Variable_seqlenk_mask=false,
         typename Engine, typename Layout>
     CUTLASS_DEVICE
     void apply(Tensor<Engine, Layout> &tSrS, const int m_block, const int n_block) const {
         static_assert(!(Causal_mask && Local_mask), "Cannot be both causal and local");
+        static_assert(!(Variable_seqlenk_mask && (Causal_mask || Local_mask)), "Variable_seqlenk_mask cannot be combined with causal or local mask");
         static_assert(Layout::rank == 3, "Only support 3D Tensor");
-        if (!Seqlenk_mask && !Causal_mask && !Local_mask) { return; }
+        if (!Seqlenk_mask && !Causal_mask && !Local_mask && !Variable_seqlenk_mask) { return; }
 
         auto thread_mma = TiledMma{}.get_thread_slice(thread_idx);
+        // printf("[Mask::apply][thread_idx: %d]\n", thread_idx);
         auto thread0_mma = TiledMma{}.get_thread_slice(_0{});
 
         static constexpr int Row = !SwapAB ? 0 : 1, Col = !SwapAB ? 1 : 0;
 
         Tensor cS = cute::make_identity_tensor(Shape<Int<!SwapAB ? kBlockM : kBlockN>, Int<!SwapAB ? kBlockN : kBlockM>>{});
         Tensor tScS = thread_mma.partition_C(cS);
+        // 获取 Tensor 的形状
+        auto shape = tScS.layout().shape();
+
+        if (thread_idx == 0) {
+            printf("=== tScS Tensor Info ===\n");
+            printf("Rank: %d\n", int(rank(tScS)));
+            printf("Shape: (%d, %d, %d)\n", 
+                int(size<0>(tScS)), 
+                int(size<1>(tScS)), 
+                int(size<2>(tScS)));
+            printf("Total elements: %d\n", int(size(tScS)));
+        }
+
         Tensor tSrS_rowcol = make_tensor(tSrS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(tSrS.layout()));
         Tensor tScS_rowcol = make_tensor(tScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(tScS.layout()));
         Tensor t0ScS = thread0_mma.partition_C(cS);
@@ -64,7 +82,30 @@ struct Mask {
         // So we subtract the limit by the first col index of this thread (get<Col>(tScS_rowcol(_0{}, _0{})))
         int const thread_col_offset = get<Col>(tScS_rowcol(_0{}, _0{}));
         int const seqlenk_col_limit = seqlen_k - n_block * kBlockN - thread_col_offset;
-        if constexpr (!Causal_mask && !Local_mask) {
+        
+        // printf("[Mask::apply] Variable_seqlenk_mask: %d\n", Variable_seqlenk_mask);
+        if constexpr (Variable_seqlenk_mask) {
+            // Variable seqlen_k mask: each row has its own seqlen_k
+            #pragma unroll
+            for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
+                int const row_idx = get<Row>(tScS_rowcol(m, _0{})) + m_block * kBlockM;
+                // Bounds check for per_row_seqlens_k array access
+                int const row_seqlen_k = (row_idx < seqlen_q && per_row_seqlens_k != nullptr) ? per_row_seqlens_k[row_idx] : seqlen_k;
+                if (thread_idx == 0) {
+                    printf("[Mask::apply][n_block: %d][kBlockN: %d][per_row_seqlens_k: %p][thread_col_offset: %d]\n", n_block, kBlockN, per_row_seqlens_k, thread_col_offset);
+                }
+                int const row_seqlenk_col_limit = row_seqlen_k - n_block * kBlockN - thread_col_offset;
+                if (thread_idx == 0) {
+                    printf("[Mask::apply][row_idx: %d][row_seqlen_k: %d] row_seqlenk_col_limit: %d\n", row_idx, row_seqlen_k, row_seqlenk_col_limit);
+                }
+                #pragma unroll
+                for (int n = 0; n < size<1>(tSrS_rowcol); ++n) {
+                    if (int(get<Col>(t0ScS_rowcol(_0{}, n))) >= row_seqlenk_col_limit) {
+                        tSrS_rowcol(m, n) = -INFINITY;
+                    }
+                }
+            }
+        } else if constexpr (!Causal_mask && !Local_mask) {
             if constexpr (Seqlenk_mask) {  // Just masking based on col
                 #pragma unroll
                 for (int n = 0; n < size<1>(tSrS_rowcol); ++n) {
