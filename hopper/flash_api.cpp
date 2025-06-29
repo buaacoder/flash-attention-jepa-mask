@@ -1253,6 +1253,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tenso
     at::Tensor v,     // (b, s_k, h_k, dv) or (total_k, h_k, dv) if there is cu_seqlens_k
     at::Tensor out,   // (b, s_q, h, dv) or (total_q, h, dv) if there is cu_seqlens_q
     at::Tensor softmax_lse,    // (b, h, s_q) or (h, total_q) if there is cu_seqlens_q
+    std::optional<at::Tensor> per_row_seqlens_k_, // per-row seqlen_k values for Variable_seqlenk_mask
+    std::optional<at::Tensor> pad_ranges_, // pad ranges for each sample: [left, right) boundaries, shape (batch_size * 2)
     std::optional<at::Tensor> dq_,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seqlens_q
     std::optional<at::Tensor> dk_,   // (b, s_k, h_k, d) or (total_k, h_k, d) if there is cu_seqlens_k
     std::optional<at::Tensor> dv_,   // (b, s_k, h_k, dv) or (total_k, h_k, dv) if there is cu_seqlens_k
@@ -1260,8 +1262,6 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tenso
     std::optional<at::Tensor> cu_seqlens_k_,   // b+1
     std::optional<at::Tensor> seqused_q_, // b. If given, only this many elements of each batch element's queries and outputs are used.
     std::optional<at::Tensor> seqused_k_, // b. If given, only this many elements of each batch element's keys are used.
-    std::optional<at::Tensor> per_row_seqlens_k_, // per-row seqlen_k values for Variable_seqlenk_mask
-    std::optional<at::Tensor> pad_ranges_, // pad ranges for each sample: [left, right) boundaries, shape (batch_size * 2)
     std::optional<int64_t> max_seqlen_q_,
     std::optional<int64_t> max_seqlen_k_,
     std::optional<double> softmax_scale_,
@@ -1659,6 +1659,8 @@ TORCH_LIBRARY(flash_attn_3, m) {
         "Tensor q,"
         "Tensor k,"
         "Tensor v,"
+        "Tensor? per_row_seqlens_k = None,"
+        "Tensor? pad_ranges = None,"
         "Tensor(k_new!)? k_new = None,"
         "Tensor(v_new!)? v_new = None,"
         "Tensor? q_v = None,"
@@ -1668,8 +1670,6 @@ TORCH_LIBRARY(flash_attn_3, m) {
         "Tensor? cu_seqlens_k_new = None,"
         "Tensor? seqused_q = None,"
         "Tensor? seqused_k = None,"
-        "Tensor? per_row_seqlens_k = None,"
-        "Tensor? pad_ranges = None,"
         "int? max_seqlen_q = None,"
         "int? max_seqlen_k = None,"
         "Tensor? page_table = None,"
@@ -1699,6 +1699,8 @@ TORCH_LIBRARY(flash_attn_3, m) {
         "Tensor v,"
         "Tensor out,"
         "Tensor softmax_lse,"
+        "Tensor? per_row_seqlens_k = None,"
+        "Tensor? pad_ranges = None,"
         "Tensor(dq!)? dq = None,"
         "Tensor(dk!)? dk = None,"
         "Tensor(dv!)? dv = None,"
@@ -1706,8 +1708,6 @@ TORCH_LIBRARY(flash_attn_3, m) {
         "Tensor? cu_seqlens_k = None,"
         "Tensor? seqused_q = None,"
         "Tensor? seqused_k = None,"
-        "Tensor? per_row_seqlens_k = None,"
-        "Tensor? pad_ranges = None,"
         "int? max_seqlen_q = None,"
         "int? max_seqlen_k = None,"
         "float? softmax_scale = None,"

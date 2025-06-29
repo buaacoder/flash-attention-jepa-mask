@@ -110,10 +110,10 @@ def _flash_attn_backward(
         q,
         k,
         v,
-        per_row_seqlens_k,
-        pad_ranges,
         out,
         softmax_lse,
+        per_row_seqlens_k,
+        pad_ranges,
         cu_seqlens_q,
         cu_seqlens_k,
         sequed_q,
@@ -137,10 +137,10 @@ def _flash_attn_backward(
         q,
         k,
         v,
-        per_row_seqlens_k,
-        pad_ranges,
         out,
         softmax_lse,
+        per_row_seqlens_k,
+        pad_ranges,
         dq,
         dk,
         dv,
@@ -241,10 +241,10 @@ class FlashAttnQKVPackedFunc(torch.autograd.Function):
             q,
             k,
             v,
-            None, # per_row_seqlens_k,
-            None, # pad_ranges
             out,
             softmax_lse,
+            None, # per_row_seqlens_k,
+            None, # pad_ranges
             None, None, # cu_seqlens_q, cu_seqlens_k,
             None, None, # sequed_q, sequed_k,
             None, None, # max_seqlen_q, max_seqlen_k,
@@ -332,10 +332,10 @@ class FlashAttnFunc(torch.autograd.Function):
             q,
             k,
             v,
-            per_row_seqlens_k, # per_row_seqlens_k,
-            pad_ranges, # pad_ranges,
             out,
             softmax_lse,
+            per_row_seqlens_k, # per_row_seqlens_k,
+            pad_ranges, # pad_ranges,
             None, None, # cu_seqlens_q, cu_seqlens_k,
             None, None, # sequed_q, sequed_k,
             None, None, # max_seqlen_q, max_seqlen_k,
@@ -352,7 +352,7 @@ class FlashAttnFunc(torch.autograd.Function):
         dq = dq[..., : q.shape[-1]]  # We could have padded the head dimension
         dk = dk[..., : k.shape[-1]]
         dv = dv[..., : v.shape[-1]]
-        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None
 
 
 class FlashAttnVarlenFunc(torch.autograd.Function):
@@ -435,10 +435,10 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
             q,
             k,
             v,
-            None, # per_row_seqlens_k,
-            None, # pad_ranges
             out,
             softmax_lse,
+            None, # per_row_seqlens_k,
+            None, # pad_ranges
             cu_seqlens_q,
             cu_seqlens_k,
             seqused_q,
