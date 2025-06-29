@@ -25,13 +25,15 @@ struct Mask {
     cutlass::FastDivmod const attention_chunk_divmod;
     cutlass::FastDivmod const qhead_per_khead_divmod;
     int const * per_row_seqlens_k;  // New: pointer to per-row seqlen_k values
+    int const * pad_ranges;  // New: pointer to pad ranges for each sample: [left, right) boundaries, shape (batch_size * 2)
 
     CUTLASS_DEVICE
     Mask(const int thread_idx, const int seqlen_q, const int seqlen_k,
          const int window_size_left, const int window_size_right, const int sink_token_length,
          cutlass::FastDivmod const &attention_chunk_divmod,
          cutlass::FastDivmod const &qhead_per_khead_divmod,
-         const int *per_row_seqlens_k = nullptr)
+         const int *per_row_seqlens_k = nullptr,
+         const int *pad_ranges = nullptr)
         : thread_idx(thread_idx)
         , seqlen_q(seqlen_q)
         , seqlen_k(seqlen_k)
@@ -41,13 +43,14 @@ struct Mask {
         , attention_chunk_divmod(attention_chunk_divmod)
         , qhead_per_khead_divmod(qhead_per_khead_divmod)
         , per_row_seqlens_k(per_row_seqlens_k)
+        , pad_ranges(pad_ranges)
     {
     };
 
     template <bool Seqlenk_mask=false, bool Causal_mask=false, bool Local_mask=false, bool Variable_seqlenk_mask=false,
         typename Engine, typename Layout>
     CUTLASS_DEVICE
-    void apply(Tensor<Engine, Layout> &tSrS, const int m_block, const int n_block) const {
+    void apply(Tensor<Engine, Layout> &tSrS, const int m_block, const int n_block, const int bidb) const {
         static_assert(!(Causal_mask && Local_mask), "Cannot be both causal and local");
         static_assert(!(Variable_seqlenk_mask && (Causal_mask || Local_mask)), "Variable_seqlenk_mask cannot be combined with causal or local mask");
         static_assert(Layout::rank == 3, "Only support 3D Tensor");
@@ -64,15 +67,15 @@ struct Mask {
         // 获取 Tensor 的形状
         auto shape = tScS.layout().shape();
 
-        if (thread_idx == 0) {
-            printf("=== tScS Tensor Info ===\n");
-            printf("Rank: %d\n", int(rank(tScS)));
-            printf("Shape: (%d, %d, %d)\n", 
-                int(size<0>(tScS)), 
-                int(size<1>(tScS)), 
-                int(size<2>(tScS)));
-            printf("Total elements: %d\n", int(size(tScS)));
-        }
+        // if (thread_idx >= 0) {
+        //     printf("=== tScS Tensor Info ===\n");
+        //     printf("Rank: %d\n", int(rank(tScS)));
+        //     printf("Shape: (%d, %d, %d)\n", 
+        //         int(size<0>(tScS)), 
+        //         int(size<1>(tScS)), 
+        //         int(size<2>(tScS)));
+        //     printf("Total elements: %d\n", int(size(tScS)));
+        // }
 
         Tensor tSrS_rowcol = make_tensor(tSrS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(tSrS.layout()));
         Tensor tScS_rowcol = make_tensor(tScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(tScS.layout()));
@@ -90,17 +93,27 @@ struct Mask {
             for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
                 int const row_idx = get<Row>(tScS_rowcol(m, _0{})) + m_block * kBlockM;
                 // Bounds check for per_row_seqlens_k array access
-                int const row_seqlen_k = (row_idx < seqlen_q && per_row_seqlens_k != nullptr) ? per_row_seqlens_k[row_idx] : seqlen_k;
-                if (thread_idx == 0) {
-                    printf("[Mask::apply][n_block: %d][kBlockN: %d][per_row_seqlens_k: %p][thread_col_offset: %d]\n", n_block, kBlockN, per_row_seqlens_k, thread_col_offset);
-                }
+                int const row_seqlen_k = (row_idx < seqlen_q && per_row_seqlens_k != nullptr) ? per_row_seqlens_k[row_idx+bidb*seqlen_q] : seqlen_k;
                 int const row_seqlenk_col_limit = row_seqlen_k - n_block * kBlockN - thread_col_offset;
-                if (thread_idx == 0) {
-                    printf("[Mask::apply][row_idx: %d][row_seqlen_k: %d] row_seqlenk_col_limit: %d\n", row_idx, row_seqlen_k, row_seqlenk_col_limit);
+                
+                // Get pad range for current batch (row_idx maps to batch)
+                int pad_left = 0, pad_right = seqlen_k;
+                if (pad_ranges != nullptr && row_idx < seqlen_q) {
+                    pad_left = pad_ranges[bidb * 2] - n_block * kBlockN - thread_col_offset;
+                    pad_right = pad_ranges[bidb * 2 + 1] - n_block * kBlockN - thread_col_offset;
                 }
+                
                 #pragma unroll
                 for (int n = 0; n < size<1>(tSrS_rowcol); ++n) {
-                    if (int(get<Col>(t0ScS_rowcol(_0{}, n))) >= row_seqlenk_col_limit) {
+                    int const col_idx = int(get<Col>(t0ScS_rowcol(_0{}, n))) + n_block * kBlockN;
+                    // Apply Variable_seqlenk_mask
+                    bool should_mask = int(get<Col>(t0ScS_rowcol(_0{}, n))) >= row_seqlenk_col_limit;
+                    // Apply pad mask: mask if col_idx is in pad range [pad_left, pad_right)
+                    should_mask = should_mask || (col_idx >= pad_left && col_idx < pad_right);
+                    // if (thread_idx >= 0) {
+                    //     printf("[Mask::apply][thread_idx: %d][n_block: %d][kBlockN: %d][m_block: %d][kBlockM: %d][per_row_seqlens_k: %p][thread_col_offset: %d][row_idx: %d][col_idx: %d][row_seqlen_k: %d][row_seqlenk_col_limit: %d][pad_left: %d][pad_right: %d][should_mask: %d]\n", thread_idx, n_block, kBlockN, m_block, kBlockM, per_row_seqlens_k, thread_col_offset, row_idx, col_idx, row_seqlen_k, row_seqlenk_col_limit, pad_left, pad_right, should_mask);
+                    // }
+                    if (should_mask) {
                         tSrS_rowcol(m, n) = -INFINITY;
                     }
                 }

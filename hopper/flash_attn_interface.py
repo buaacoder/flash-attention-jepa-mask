@@ -22,6 +22,7 @@ def _flash_attn_forward(
         k,
         v,
         per_row_seqlens_k,
+        pad_ranges,
         k_new,
         v_new,
         qv,
@@ -57,7 +58,7 @@ def _flash_attn_forward(
     cu_seqlens_q, cu_seqlens_k, cu_seqlens_k_new = [
         maybe_contiguous(x) for x in (cu_seqlens_q, cu_seqlens_k, cu_seqlens_k_new)
     ]
-    seqused_q, seqused_k, per_row_seqlens_k = [maybe_contiguous(x) for x in (seqused_q, seqused_k, per_row_seqlens_k)]
+    seqused_q, seqused_k, per_row_seqlens_k, pad_ranges = [maybe_contiguous(x) for x in (seqused_q, seqused_k, per_row_seqlens_k, pad_ranges)]
     page_table, kv_batch_idx, leftpad_k = [
         maybe_contiguous(x) for x in (page_table, kv_batch_idx, leftpad_k)
     ]
@@ -68,6 +69,7 @@ def _flash_attn_forward(
         k,
         v,
         per_row_seqlens_k,
+        pad_ranges,
         k_new,
         v_new,
         qv,
@@ -109,6 +111,7 @@ def _flash_attn_backward(
         k,
         v,
         per_row_seqlens_k,
+        pad_ranges,
         out,
         softmax_lse,
         cu_seqlens_q,
@@ -135,6 +138,7 @@ def _flash_attn_backward(
         k,
         v,
         per_row_seqlens_k,
+        pad_ranges,
         out,
         softmax_lse,
         dq,
@@ -188,6 +192,7 @@ class FlashAttnQKVPackedFunc(torch.autograd.Function):
             k,
             v,
             None,   # per_row_seqlens_k
+            None,   # pad_ranges
             None, None,  # k_new, v_new
             None,  # qv
             None,  # out
@@ -237,6 +242,7 @@ class FlashAttnQKVPackedFunc(torch.autograd.Function):
             k,
             v,
             None, # per_row_seqlens_k,
+            None, # pad_ranges
             out,
             softmax_lse,
             None, None, # cu_seqlens_q, cu_seqlens_k,
@@ -265,6 +271,7 @@ class FlashAttnFunc(torch.autograd.Function):
         k,
         v,
         per_row_seqlens_k,
+        pad_ranges,
         softmax_scale,
         causal,
         qv=None,
@@ -285,6 +292,7 @@ class FlashAttnFunc(torch.autograd.Function):
             k,
             v,
             per_row_seqlens_k,   # per_row_seqlens_k
+            pad_ranges,   # pad_ranges
             None, None,  # k_new, v_new
             qv,  # qv
             None,  # out
@@ -304,7 +312,7 @@ class FlashAttnFunc(torch.autograd.Function):
             sm_margin=sm_margin,
         )
         # ctx.save_for_backward(q, k, v, out_padded, softmax_lse)
-        ctx.save_for_backward(q, k, v, out, softmax_lse, per_row_seqlens_k)
+        ctx.save_for_backward(q, k, v, out, softmax_lse, per_row_seqlens_k, pad_ranges)
         ctx.softmax_scale = softmax_scale
         ctx.causal = causal
         ctx.window_size = window_size
@@ -316,7 +324,7 @@ class FlashAttnFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout, *args):
-        q, k, v, out, softmax_lse, per_row_seqlens_k = ctx.saved_tensors
+        q, k, v, out, softmax_lse, per_row_seqlens_k, pad_ranges = ctx.saved_tensors
         assert ctx.attention_chunk == 0, "FA3 backward does not support attention_chunk"
         dq, dk, dv = torch.empty_like(q), torch.empty_like(k), torch.empty_like(v)
         _flash_attn_backward(
@@ -325,6 +333,7 @@ class FlashAttnFunc(torch.autograd.Function):
             k,
             v,
             per_row_seqlens_k, # per_row_seqlens_k,
+            pad_ranges, # pad_ranges,
             out,
             softmax_lse,
             None, None, # cu_seqlens_q, cu_seqlens_k,
@@ -380,6 +389,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
             k,
             v,
             None, # per_row_seqlens_k,
+            None, # pad_ranges,
             None, None,  # k_new, v_new
             qv,  # qv
             None,  # out
@@ -426,6 +436,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
             k,
             v,
             None, # per_row_seqlens_k,
+            None, # pad_ranges
             out,
             softmax_lse,
             cu_seqlens_q,
@@ -514,7 +525,8 @@ def flash_attn_func(
     q,
     k,
     v,
-    per_row_seqlens_k,
+    per_row_seqlens_k=None,
+    pad_ranges=None,
     softmax_scale=None,
     causal=False,
     qv=None,
@@ -577,6 +589,7 @@ def flash_attn_func(
         k,
         v,
         per_row_seqlens_k,
+        pad_ranges,
         softmax_scale,
         causal,
         qv,

@@ -218,6 +218,7 @@ struct CollectiveMainloopFwdSm80 {
         int const* const leftpad_k = nullptr;
         int const* const seqlens_rotary = nullptr;
         int const* const per_row_seqlens_k = nullptr;
+        int const* const pad_ranges = nullptr;
     };
 
     // Device side kernel params
@@ -265,6 +266,7 @@ struct CollectiveMainloopFwdSm80 {
         int const* const leftpad_k = nullptr;
         int const* const seqlens_rotary = nullptr;
         int const* const per_row_seqlens_k = nullptr;
+        int const* const pad_ranges = nullptr;
     };
 
     static Params
@@ -307,7 +309,7 @@ struct CollectiveMainloopFwdSm80 {
                 !Split ? 1 : args.num_splits,
                 args.kv_batch_idx,
                 args.cu_seqlens_q, args.cu_seqlens_k, args.cu_seqlens_k_new,
-                args.seqused_q, args.seqused_k, args.leftpad_k, args.seqlens_rotary, args.per_row_seqlens_k};
+                args.seqused_q, args.seqused_k, args.leftpad_k, args.seqlens_rotary, args.per_row_seqlens_k, args.pad_ranges};
     }
 
     template <typename SharedStorage, typename FrgTensorO, typename Softmax>
@@ -556,13 +558,9 @@ struct CollectiveMainloopFwdSm80 {
 
         if constexpr (!Share_QV_Smem) { preprocess_Q(); }
 
-        if (thread_idx == 0) {
-            printf("[SM80 mainloop] Before mask construction: params.per_row_seqlens_k = %p\n", params.per_row_seqlens_k);
-        }
-
         flash::Mask<kBlockM, kBlockN, PackGQA, TiledMma> mask(
             thread_idx, seqlen_q, seqlen_k, params.window_size_left, params.window_size_right, 0 /*sink_token_length*/,
-            params.attention_chunk_divmod, params.qhead_per_khead_divmod, params.per_row_seqlens_k
+            params.attention_chunk_divmod, params.qhead_per_khead_divmod, params.per_row_seqlens_k, params.pad_ranges
         );
 
         float softcap_val = params.softcap_val;
@@ -630,11 +628,11 @@ struct CollectiveMainloopFwdSm80 {
             smem_pipe_read = smem_pipe_read < kStages - 1 ? smem_pipe_read + 1 : 0;
         };
 
-        auto first_iter_mask_fn = [&](auto& tSrS, int n_block) { mask.template apply<true /*Seqlenk_mask*/, Is_causal, Is_local, Variable_seqlenk_mask>(tSrS, m_block, n_block); };
+        auto first_iter_mask_fn = [&](auto& tSrS, int n_block) { mask.template apply<true /*Seqlenk_mask*/, Is_causal, Is_local, Variable_seqlenk_mask>(tSrS, m_block, n_block, bidb); };
         fwd_step(n_block, first_iter_mask_fn, cute::true_type{} /*is_first_iter*/, cute::true_type{} /*check_inf*/);
         --n_block;
         if constexpr (Is_causal || Is_local) {
-            auto mask_fn = [&](auto& tSrS, int n_block) { mask.template apply<false /*Seqlenk_mask*/, Is_causal, Is_local, Variable_seqlenk_mask>(tSrS, m_block, n_block); };
+            auto mask_fn = [&](auto& tSrS, int n_block) { mask.template apply<false /*Seqlenk_mask*/, Is_causal, Is_local, Variable_seqlenk_mask>(tSrS, m_block, n_block, bidb); };
             int const n_block_min_causal_local_mask = BlockMN_t::get_n_block_min_causal_local_mask(
                 seqlen_info, m_block, n_block_min, params.window_size_right,
                 params.attention_chunk_divmod, params.qhead_per_khead_divmod);
@@ -653,7 +651,7 @@ struct CollectiveMainloopFwdSm80 {
         }
         // Separate masking iterations on the left for local attention
         if constexpr (Is_local) {
-            auto local_mask_fn = [&](auto& tSrS, int n_block) { mask.template apply<false /*Seqlenk_mask*/, false /*Causal_mask*/, Is_local, Variable_seqlenk_mask>(tSrS, m_block, n_block); };
+            auto local_mask_fn = [&](auto& tSrS, int n_block) { mask.template apply<false /*Seqlenk_mask*/, false /*Causal_mask*/, Is_local, Variable_seqlenk_mask>(tSrS, m_block, n_block, bidb); };
             #pragma unroll 1
             for (; n_block >= n_block_min; --n_block) {
                 fwd_step(n_block, local_mask_fn, cute::false_type{} /*is_first_iter*/, cute::bool_constant<Is_local>{} /*check_inf*/);

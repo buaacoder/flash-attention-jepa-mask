@@ -60,6 +60,7 @@ void set_params_fprop(Flash_fwd_params &params,
                       void *seqused_q,
                       void *seqused_k,
                       void *per_row_seqlens_k,
+                      void *pad_ranges,
                       void *softmax_lse_d,
                       float p_dropout,
                       float softmax_scale,
@@ -107,6 +108,8 @@ void set_params_fprop(Flash_fwd_params &params,
     params.per_row_seqlens_k = static_cast<int *>(per_row_seqlens_k);
     printf("[set_params_fprop] per_row_seqlens_k ptr: %p\n", per_row_seqlens_k);
     printf("[set_params_fprop] params.per_row_seqlens_k ptr: %p\n", params.per_row_seqlens_k);
+
+    params.pad_ranges = static_cast<int *>(pad_ranges);
 
     // Softmax sum
     params.softmax_lse_ptr = softmax_lse_d;
@@ -192,6 +195,7 @@ void set_params_dgrad(Flash_bwd_params &params,
                       void *seqused_q,
                       void *seqused_k,
                       void *per_row_seqlens_k,
+                      void *pad_ranges,
                       void *dq_accum_d,
                       void *dk_accum_d,
                       void *dv_accum_d,
@@ -214,6 +218,7 @@ void set_params_dgrad(Flash_bwd_params &params,
                      seqused_q,
                      seqused_k,
                      per_row_seqlens_k,
+                     pad_ranges,
                      softmax_lse_d,
                      p_dropout,
                      softmax_scale,
@@ -649,6 +654,7 @@ mha_fwd(at::Tensor q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seql
         at::Tensor k,  // (b_k, s_k, h_k, d) or (total_k, h_k, d) if there is cu_seqlens_k or (num_pages, page_size, h_k, d) if there is page_table.
         at::Tensor v,  // (b_k, s_k, h_k, dv) or (total_k, h_k, dv) if there is cu_seqlens_k or (num_pages, page_size, h_k, dv) if there is page_table.
         std::optional<at::Tensor> per_row_seqlens_k_, // per-row seqlen_k values for Variable_seqlenk_mask
+        std::optional<at::Tensor> pad_ranges_, // pad ranges for each sample: [left, right) boundaries, shape (batch_size * 2)
         std::optional<at::Tensor> k_new_,  // (b, s_k_new, h_k, d) or (total_k_new, h_k, d) if there is cu_seqlens_k_new
         std::optional<at::Tensor> v_new_,  // (b, s_k_new, h_k, dv) or (total_k_new, h_k, dv) if there is cu_seqlens_k_new
         std::optional<at::Tensor> q_v_,  // (b, s_q, h, dv) or (total_q_new, h, dv) if there is cu_seqlens_q
@@ -821,6 +827,13 @@ mha_fwd(at::Tensor q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seql
         CHECK_SHAPE(per_row_seqlens_k, !is_varlen_q ? batch_size * seqlen_q : total_q);
     }
 
+    if (pad_ranges_.has_value()) {
+        auto pad_ranges = pad_ranges_.value();
+        TORCH_CHECK(pad_ranges.dtype() == torch::kInt32, "pad_ranges must have dtype torch.int32");
+        CHECK_DEVICE(pad_ranges); CHECK_CONTIGUOUS(pad_ranges);
+        CHECK_SHAPE(pad_ranges, batch_size * 2);
+    }
+
     if (leftpad_k_.has_value()) {
         auto leftpad_k = leftpad_k_.value();
         TORCH_CHECK(leftpad_k.dtype() == torch::kInt32, "leftpad_k must have dtype int32");
@@ -887,6 +900,7 @@ mha_fwd(at::Tensor q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seql
                      seqused_q_.has_value() ? seqused_q_.value().data_ptr() : nullptr,
                      seqused_k_.has_value() ? seqused_k_.value().data_ptr() : nullptr,
                      per_row_seqlens_k_.has_value() ? per_row_seqlens_k_.value().data_ptr() : nullptr,
+                     pad_ranges_.has_value() ? pad_ranges_.value().data_ptr() : nullptr,
                      softmax_lse.data_ptr(),
                      /*p_dropout=*/0.f,
                      softmax_scale,
@@ -1247,6 +1261,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tenso
     std::optional<at::Tensor> seqused_q_, // b. If given, only this many elements of each batch element's queries and outputs are used.
     std::optional<at::Tensor> seqused_k_, // b. If given, only this many elements of each batch element's keys are used.
     std::optional<at::Tensor> per_row_seqlens_k_, // per-row seqlen_k values for Variable_seqlenk_mask
+    std::optional<at::Tensor> pad_ranges_, // pad ranges for each sample: [left, right) boundaries, shape (batch_size * 2)
     std::optional<int64_t> max_seqlen_q_,
     std::optional<int64_t> max_seqlen_k_,
     std::optional<double> softmax_scale_,
@@ -1480,6 +1495,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tenso
                      seqused_q_.has_value() ? seqused_q_.value().data_ptr() : nullptr,
                      seqused_k_.has_value() ? seqused_k_.value().data_ptr() : nullptr,
                      per_row_seqlens_k_.has_value() ? per_row_seqlens_k_.value().data_ptr() : nullptr,
+                     pad_ranges_.has_value() ? pad_ranges_.value().data_ptr() : nullptr,
                      dq_accum.data_ptr(),
                      num_heads_k != num_heads ? dk_accum.data_ptr() : nullptr,
                      num_heads_k != num_heads ? dv_accum.data_ptr() : nullptr,
@@ -1653,6 +1669,7 @@ TORCH_LIBRARY(flash_attn_3, m) {
         "Tensor? seqused_q = None,"
         "Tensor? seqused_k = None,"
         "Tensor? per_row_seqlens_k = None,"
+        "Tensor? pad_ranges = None,"
         "int? max_seqlen_q = None,"
         "int? max_seqlen_k = None,"
         "Tensor? page_table = None,"
@@ -1690,6 +1707,7 @@ TORCH_LIBRARY(flash_attn_3, m) {
         "Tensor? seqused_q = None,"
         "Tensor? seqused_k = None,"
         "Tensor? per_row_seqlens_k = None,"
+        "Tensor? pad_ranges = None,"
         "int? max_seqlen_q = None,"
         "int? max_seqlen_k = None,"
         "float? softmax_scale = None,"

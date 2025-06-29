@@ -84,6 +84,9 @@ struct Flash_fwd_params : public Qkv_params {
     // Per-row seqlen_k values for Variable_seqlenk_mask
     int *__restrict__ per_row_seqlens_k;
 
+    // Pad ranges for each sample: [left, right) boundaries, shape (batch_size * 2)
+    int *__restrict__ pad_ranges;
+
     // The stride between rows of Oaccum.
     index_t oaccum_split_stride;
     index_t oaccum_batch_stride;
